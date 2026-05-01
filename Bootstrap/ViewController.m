@@ -309,6 +309,8 @@ void reinstallPackageManager()
 
 int rebuildIconCache()
 {
+    signal(SIGPIPE, SIG_IGN);
+    
     ASSERT([@"1" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     AppInfo* tsapp = [AppInfo appWithBundleIdentifier:@"com.opa334.TrollStore"];
     if(!tsapp) {
@@ -317,7 +319,7 @@ int rebuildIconCache()
         return -1;
     }
 
-    STRAPLOG("rebuild icon cache...");
+    STRAPLOG("rebuildIconCache: rebuild icon cache...");
     ASSERT([@"2" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     if(![LSApplicationWorkspace.defaultWorkspace _LSPrivateRebuildApplicationDatabasesForSystemApps:YES internal:YES user:YES]) {
         ASSERT([@"-2" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
@@ -327,6 +329,7 @@ int rebuildIconCache()
     NSString* log=nil;
     NSString* err=nil;
 
+    STRAPLOG("rebuildIconCache: refresh trollstore apps...");
     ASSERT([@"3" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     if(spawn_root([tsapp.bundleURL.path stringByAppendingPathComponent:@"trollstorehelper"], @[@"refresh"], &log, &err) != 0) {
         ASSERT([@"-3" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
@@ -334,11 +337,13 @@ int rebuildIconCache()
         return -1;
     }
 
+    STRAPLOG("rebuildIconCache: launching Bootstrap app...");
     ASSERT([@"201" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     if(![LSApplicationWorkspace.defaultWorkspace openApplicationWithBundleID:NSBundle.mainBundle.bundleIdentifier]) {
         ASSERT([@"-4" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     }
 
+    STRAPLOG("rebuildIconCache: rebuild tweaked apps...");
     ASSERT([@"202" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     if(spawn_bootstrap_binary((char*[]){"/bin/sh", "/basebin/rebuildApps.sh", NULL}, &log, &err) != 0) {
         ASSERT([@"-5" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
@@ -346,10 +351,13 @@ int rebuildIconCache()
         return -1;
     }
     
+    STRAPLOG("rebuildIconCache: respring...");
     ASSERT([@"203" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     killAllForExecutable("/usr/libexec/backboardd", SIGKILL);
     
+    STRAPLOG("rebuildIconCache: done.");
     ASSERT([@"100" writeToFile:jbroot(@"/var/mobile/.rebuildiconcache") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    
     return 0;
 }
 
@@ -413,26 +421,28 @@ void URLSchemesAction(BOOL enable)
 {
     if(!isSystemBootstrapped()) return;
     
-    if(!enable)
+    if(launchctl_support() && !enable)
     {
-        if(launchctl_support()) {
-            [NSNotificationCenter.defaultCenter postNotificationName:@"URLSchemesStatusNotification" object:@(YES)];
-            [AppDelegate showMesage:Localized(@"URL Schemes are now undetectable on your device, you don't need to disable them anymore.") title:@""];
-            return;
-        }
+        [NSNotificationCenter.defaultCenter postNotificationName:@"URLSchemesStatusNotification" object:@(YES)];
+        [AppDelegate showMesage:Localized(@"URL Schemes are now undetectable on your device, you don't need to disable them anymore.") title:@""];
         
-        URLSchemesToggle(enable);
         return;
     }
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:Localized(@"Warning") message:Localized(@"Enabling URL Schemes may result in jailbreak detection. Are you sure you want to continue?") preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:Localized(@"NO") style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){
-        [NSNotificationCenter.defaultCenter postNotificationName:@"URLSchemesStatusNotification" object:@(NO)];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:Localized(@"YES") style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        URLSchemesToggle(enable);
-    }]];
-    [AppDelegate showAlert:alert];
+    else if(!launchctl_support() && enable)
+    {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:Localized(@"Warning") message:Localized(@"Enabling URL Schemes may result in jailbreak detection. Are you sure you want to continue?") preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:Localized(@"NO") style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){
+            [NSNotificationCenter.defaultCenter postNotificationName:@"URLSchemesStatusNotification" object:@(NO)];
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:Localized(@"YES") style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+            URLSchemesToggle(enable);
+        }]];
+        [AppDelegate showAlert:alert];
+
+        return;
+    }
+
+    URLSchemesToggle(enable);
 }
 
 BOOL opensshAction(BOOL enable)
@@ -488,8 +498,6 @@ int exploitStart(NSString* execDir)
         STRAPLOG("TaskPortHaxx: %@", err); //only output stderr here
         return status;
     }
-    
-    ASSERT(spawn_root(jbroot(@"/basebin/bsctl"), @[@"usreboot"], nil, nil) == 0);
     
     return 0;
 }
@@ -662,6 +670,31 @@ void bootstrapAction()
 
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         setIdleTimerDisabled(YES);
+        
+        BOOL KernelExploit = [NSUserDefaults.appDefaults boolForKey:@"KernelExploit"];
+        
+        if(@available(iOS 16.0, *))
+        {
+            if(KernelExploit)
+            {
+                int patchfinding();
+                int exploit_init(const char *flavor);
+                
+                [AppDelegate addLogText:Localized(@"Status: Patch Finding")];
+                if(patchfinding() != 0) {
+                    [AppDelegate addLogText:@"patchfinding failed!"];
+                    [AppDelegate dismissHud];
+                    return;
+                }
+                
+                [AppDelegate addLogText:Localized(@"Status: Exploit Kernel")];
+                if(exploit_init("ds") != 0) {
+                    [AppDelegate addLogText:@"exploit_init failed!"];
+                    [AppDelegate dismissHud];
+                    return;
+                }
+            }
+        }
 
         const char* argv[] = {NSBundle.mainBundle.executablePath.fileSystemRepresentation, "bootstrap", NULL};
         int status = spawn_binary(argv[0], argv, environ, nil, ^(char* outstr, int length) {
@@ -764,6 +797,26 @@ void bootstrapAction()
             if(status!=0) {
                 [AppDelegate showMesage:Localized(@"Please reboot device and try again.") title:[NSString stringWithFormat:@"code(%d)",status]];
                 [AppDelegate dismissHud];
+                return;
+            }
+            
+            if(@available(iOS 16.0, *))
+            {
+                if(KernelExploit)
+                {
+                    void hideDeveloperMode();
+                    hideDeveloperMode();
+                }
+            }
+            
+            setIdleTimerDisabled(NO);
+            [AppDelegate dismissHud];
+            [generator impactOccurred];
+            
+            [AppDelegate addLogText:Localized(@"reboot userspace now...")]; sleep(1);
+            status = spawn_root(jbroot(@"/basebin/bsctl"), @[@"usreboot"], &log, &err);
+            if(status != 0) {
+                [AppDelegate showMesage:[NSString stringWithFormat:@"%@\n\nstderr:\n%@",log,err] title:[NSString stringWithFormat:@"code(%d)",status]];
                 return;
             }
             
